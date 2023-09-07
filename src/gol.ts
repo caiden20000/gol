@@ -37,7 +37,7 @@
 // This also means that the crazy number of 33,000,000 different combos is STILL cheaper
 // than calculating the 3x3 answer on the fly, simply because if we have the answer, it is FREE.
 
-// This all means we have a new system ofr subpatterns: Overlapping subpatterns.
+// This all means we have a new system for subpatterns: Overlapping subpatterns.
 // We choose a size for the transformed subpattern, and we have tied to that the neighboring cells.
 // So max subpattern size for 32 bit int is 3x3, for the 5x5 being stored.
 
@@ -56,9 +56,8 @@ type Pos = {
 
 type Cell = {
     active: boolean,
-    neighbors: number,
     pos: Pos
-}
+};
 
 type CellMap = Map<string, Cell>;
 
@@ -67,21 +66,76 @@ type CellMap = Map<string, Cell>;
 //      max square grid size is 5x5 == 25 bits
 //      though if we used floats (64 bit),
 //      max grid size would be 8 * 8 = 64 bits exactly
-type Subpattern = number;
+type Subpattern = {
+    binary: number,
+    size: number
+}
+
 type SubpatternMap = Map<string, Subpattern>;
 
 type Transform = {
-    pattern: Subpattern,
+    present: Subpattern,
+    future: Subpattern
 }
+
+// Simple GOL ruleset
+type Ruleset = {
+    survive: number[],
+    birth: number[]
+}
+
+// Conway's original ruleset
+const CGOL = { survive: [2, 3], birth: [3] };
 
 ///////
 // Classes
 //////
 
+// There are two coordinate systems - cell and subpattern
+// The cell coordinate system shares origin with subpattern coords
+// The cell coords are multiplied by the subpattern size
 class Universe {
+    subpatternMap: SubpatternMap;
+    // Do remember that the size of the subpatterns will be 2 larger than ths number.
+    subpatternSize: number;
     constructor() {
-
+        this.subpatternMap = new Map();
+        this.subpatternSize = 3;
     }
+
+    getSubpattern(pos: Pos): Subpattern {
+        const result = this.subpatternMap.get(posToString(pos));
+        if (result) return result;
+        return emptySubpattern(this.subpatternSize);
+    }
+
+    setSubpattern(pos: Pos, subpattern: Subpattern) {
+        this.subpatternMap.set(posToString(pos), subpattern);
+    }
+
+    cellPosToSubpatternPos(pos: Pos): Pos {
+        return {
+            x: Math.round(pos.x / this.subpatternSize),
+            y: Math.round(pos.y / this.subpatternSize)
+        };
+    }
+
+    subpatternPosToCellPos(pos: Pos, shift: Pos = originPos()): Pos {
+        const newPos = {
+            x: pos.x * this.subpatternSize,
+            y: pos.y * this.subpatternSize
+        };
+        // Shift (1, 1) automatically because all subpatterns include neighbors:
+        // This means the edge cells of the subpattern are by default outside the
+        //      bounds referenced by the position given.
+        return shiftPos(newPos, shift.x + 1, shift.y + 1);
+    }
+
+    getSubpatternFromCellPos(pos: Pos) {
+        return this.getSubpattern(this.cellPosToSubpatternPos(pos));
+    }
+
+
 }
 
 // ??
@@ -90,6 +144,124 @@ class Universe {
 // Functions
 /////
 
-function generateSubpatternTransforms() {
+function emptySubpattern(size: number): Subpattern {
+    return {
+        binary: 0,
+        size: size
+    };
+}
 
+function originPos(): Pos {
+    return {x: 0, y: 0};
+}
+
+function posToString(pos: Pos): string {
+    return `${pos.x},${pos.y}`;
+}
+
+function shiftPos(pos: Pos, x: number, y: number) {
+    return {x: pos.x + x, y: pos.y + y};
+}
+
+// Reading from left to right, in a space with "size" width,
+// distance is how many cells (or "words"?) you've read.
+function linearTo2D(distance: number, size: number): Pos {
+    return {
+        x: distance % size,
+        y: Math.floor(distance / size)
+    }
+}
+
+function posToLinear(pos: Pos, size: number): number {
+    return pos.x + pos.y * size;
+}
+
+function getBitAt(subject: number, bitPos: number): boolean {
+    return (subject & 2**bitPos) != 0;
+}
+
+function setBitAt(subject: number, bitPos: number, value: boolean): number {
+    if (value) return subject | 2**bitPos;
+    return subject & ~(2**bitPos);
+}
+
+// Generates a universe from origin to size, size
+function subpatternToCellMap(subpattern: Subpattern): CellMap {
+    const map: CellMap = new Map();
+    const numberOfCells = subpattern.size**2;
+    
+    for (let i=0; i<numberOfCells; i++) {
+        const currentPos = linearTo2D(i, subpattern.size);
+        const active = getBitAt(subpattern.binary, i);
+        const cell = {
+            active: active,
+            pos: currentPos
+        }
+        map.set(posToString(currentPos), cell);
+    }
+
+    return map;
+}
+
+function getNeighbors(pos: Pos): Pos[] {
+    const posArr = [];
+    for (let x = -1; x <= 1; x++) {
+        for (let y = -1; y <= 1; y++) {
+            if (x == 0 && y == 0) continue;
+            posArr.push(shiftPos(pos, x, y));
+        }
+    }
+    return posArr;
+}
+
+// Step universe GOL
+// Not written efficiently, but it is OK, 
+//      this will only be used in generating the transforms.
+function stepCellMap(map: CellMap, rules: Ruleset = CGOL): CellMap {
+    const newMap: CellMap = new Map();
+    for (const cell of map.values()) {
+        let numberOfNeighbors = 0;
+        let neighboringPositions = getNeighbors(cell.pos);
+        for (const neighborPos of neighboringPositions) {
+            const neighbor = map.get(posToString(neighborPos));
+            if (neighbor?.active) numberOfNeighbors ++;
+        }
+        let active = false;
+        if (cell.active && rules.survive.includes(numberOfNeighbors) ||
+            cell.active == false && rules.birth.includes(numberOfNeighbors)) {
+            active = true;
+        }
+        newMap.set(posToString(cell.pos), {
+            active: active,
+            pos: cell.pos
+        });
+    }
+    return newMap;
+}
+
+// Convert origin (+, +) to subpattern, shift used for getting future for transforms
+function getSubpatternFromCellMap(map: CellMap, size: number, shift: Pos = originPos()): Subpattern {
+    let binary = 0;
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y ++) {
+            const pos = shiftPos({x: x, y: y}, shift.x, shift.y);
+            const distance = posToLinear(pos, size);
+            const active = map.get(posToString(pos))?.active ?? false;
+            binary = setBitAt(binary, distance, active);
+        }
+    }
+    return {
+        binary: binary,
+        size: size
+    };
+}
+
+function generateTransform(subpattern: Subpattern): Transform {
+    const map = subpatternToCellMap(subpattern);
+    const newMap = stepCellMap(map);
+    const future = getSubpatternFromCellMap(newMap, subpattern.size-2, {x:1,y:1});
+    return {
+        present: subpattern,
+        future: future
+    };
 }
